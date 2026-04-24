@@ -370,7 +370,7 @@ export async function getSellerLensData(
 
 type EngagementSearchResult = { total: number };
 
-async function fetchOwnerActivityCounts(
+export async function fetchOwnerActivityCounts(
   ownerId: string,
   sinceIso: string
 ): Promise<SellerLensData['activity_count']> {

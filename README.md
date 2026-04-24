@@ -93,11 +93,13 @@ morning-brief fails loud if you forget it.
 
 ### Known stubs
 
-- `rep_activity: {}` in `/api/cron/hubspot-snapshot` — needs per-seller
-  engagement counts via `src/lib/hubspot.ts` helpers; lights up
-  `weekly_reflection.hubspot_deltas.rep_anomalies`.
-- `pipeline_wow_delta` / `rep_anomalies` in `getExecutiveLensData` — wake up
-  after two Sunday snapshots exist; no code change needed.
+- `pipeline_wow_delta` in `getExecutiveLensData` — wakes up after two Sunday
+  snapshots exist. Needs a small diff-computation against the two most recent
+  `hubspot_snapshots` rows; no blocker, just not written yet.
+- `rep_anomalies` in `getExecutiveLensData` — needs a 30-day rolling mean and
+  stdev of per-rep activity to flag "1.5 stdev below". Requires ~4 Sunday
+  snapshots of history. `rep_activity` is now populated by the snapshot cron,
+  so the data will be there when you're ready to write the anomaly detector.
 
 ## Architecture
 
