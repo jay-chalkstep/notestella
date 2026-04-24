@@ -173,6 +173,9 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const reflection = await generateWeeklyReflection(input);
+  // pdf_filename is the intended delivery filename; no PDF is rendered or stored
+  // here. morning-brief re-renders from content jsonb at email time — content
+  // is the source of truth, the PDF is disposable.
   const pdfFilename = `reflection-weekly-${mondayDate}.pdf`;
 
   const { data: inserted, error: insertErr } = await getSupabase()

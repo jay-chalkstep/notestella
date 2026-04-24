@@ -262,13 +262,22 @@ export async function getCustomerLensData(emails: string[]): Promise<CustomerLen
         };
       });
 
-    for (const deal of openDeals) {
-      if (deal.days_since_last_activity !== null && deal.days_since_last_activity > 30) {
-        const who = deal.company_name ? ` (${deal.company_name})` : '';
-        stuckFlags.push(
-          `Deal "${deal.name}"${who} has no activity for ${deal.days_since_last_activity} days`
-        );
-      }
+    const stuckCandidates = openDeals
+      .filter(
+        (d): d is typeof d & { days_since_last_activity: number } =>
+          d.days_since_last_activity !== null && d.days_since_last_activity > 30
+      )
+      .sort((a, b) => b.days_since_last_activity - a.days_since_last_activity);
+    const STUCK_CAP = 6;
+    const shown = stuckCandidates.slice(0, STUCK_CAP);
+    for (const deal of shown) {
+      const who = deal.company_name ? ` (${deal.company_name})` : '';
+      stuckFlags.push(
+        `Deal "${deal.name}"${who} has no activity for ${deal.days_since_last_activity} days`
+      );
+    }
+    if (stuckCandidates.length > STUCK_CAP) {
+      stuckFlags.push(`+ ${stuckCandidates.length - STUCK_CAP} more stuck deals`);
     }
   }
 
@@ -310,7 +319,7 @@ export async function getSellerLensData(
 
   type StageBucket = { stage: string; count: number; total_amount: number };
   const byStage = new Map<string, StageBucket>();
-  const atRisk: SellerLensData['at_risk_deals'] = [];
+  const atRiskCandidates: SellerLensData['at_risk_deals'] = [];
 
   for (const d of dealSearch.results) {
     const stage = d.properties.dealstage ?? 'unknown';
@@ -325,11 +334,21 @@ export async function getSellerLensData(
       d.properties.notes_last_updated ?? d.properties.hs_lastmodifieddate ?? undefined;
     const days = daysSince(lastActivity);
     if (days !== null && days > 14) {
-      atRisk.push({
+      atRiskCandidates.push({
         deal_name: d.properties.dealname ?? '(unnamed deal)',
         days_since_activity: days,
       });
     }
+  }
+
+  const AT_RISK_CAP = 6;
+  atRiskCandidates.sort((a, b) => b.days_since_activity - a.days_since_activity);
+  const atRisk = atRiskCandidates.slice(0, AT_RISK_CAP);
+  if (atRiskCandidates.length > AT_RISK_CAP) {
+    atRisk.push({
+      deal_name: `+ ${atRiskCandidates.length - AT_RISK_CAP} more`,
+      days_since_activity: 0,
+    });
   }
 
   // Activity counts: search engagements owned by this rep within window.

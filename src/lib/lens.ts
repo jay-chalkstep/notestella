@@ -8,35 +8,39 @@ export type LensSelection = {
   focusPersonOwnerId?: string;
 };
 
-type PersonRow = {
+export type PersonRow = {
   email: string;
   role: 'customer' | 'seller' | 'sales_leader' | 'other';
   hubspot_owner_id: string | null;
 };
 
-async function loadPeople(emails: string[]): Promise<Map<string, PersonRow>> {
-  if (emails.length === 0) return new Map();
+export type PeopleMap = Map<string, PersonRow>;
+
+export async function loadPeople(emails: string[]): Promise<PeopleMap> {
+  const unique = Array.from(new Set(emails.map((e) => e.toLowerCase())));
+  if (unique.length === 0) return new Map();
   const { data, error } = await getSupabase()
     .from('people')
     .select('email, role, hubspot_owner_id')
-    .in('email', emails);
+    .in('email', unique);
   if (error) throw new Error(`people lookup: ${error.message}`);
   return new Map(
     (data ?? []).map((r) => [(r.email as string).toLowerCase(), r as PersonRow])
   );
 }
 
-export async function selectLens(
+// Caller-supplies-people variant — lets the caller batch a single lookup across
+// many meetings. Pass the union of external attendee emails into loadPeople()
+// once at the top of a cron run, then call this per-meeting.
+export function selectLensWith(
   attendees: Attendee[],
-  myEmail: string
-): Promise<LensSelection> {
+  myEmail: string,
+  people: PeopleMap
+): LensSelection {
   const me = myEmail.toLowerCase();
   const others = attendees.filter((a) => a.email.toLowerCase() !== me);
 
   if (others.length === 0) return { lens: 'none' };
-
-  const emails = others.map((a) => a.email.toLowerCase());
-  const people = await loadPeople(emails);
 
   const isOneOnOne = attendees.length === 2 && others.length === 1;
 
@@ -63,4 +67,17 @@ export async function selectLens(
   if (hasExternalOrCustomer) return { lens: 'customer' };
 
   return { lens: 'none' };
+}
+
+// Convenience wrapper — loads people on demand. Use for one-off callers; use
+// selectLensWith() in a loop to amortize the Supabase round-trip.
+export async function selectLens(
+  attendees: Attendee[],
+  myEmail: string
+): Promise<LensSelection> {
+  const me = myEmail.toLowerCase();
+  const others = attendees.filter((a) => a.email.toLowerCase() !== me);
+  const emails = others.map((a) => a.email);
+  const people = await loadPeople(emails);
+  return selectLensWith(attendees, myEmail, people);
 }

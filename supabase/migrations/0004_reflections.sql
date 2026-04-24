@@ -6,6 +6,9 @@ create table reflections (
   period_start date not null,
   period_end date not null,
   content jsonb not null,
+  -- pdf_filename is the intended delivery filename, NOT a pointer to stored bytes.
+  -- Reflection PDFs are re-rendered on demand from content jsonb at morning-brief
+  -- delivery time — content is the source of truth, PDF is disposable.
   pdf_filename text,
   delivered_at timestamptz,
   source_notes jsonb not null default '[]'::jsonb,       -- array of note ids
@@ -13,10 +16,12 @@ create table reflections (
   created_at timestamptz not null default now()
 );
 
-create unique index reflections_unique_daily on reflections(type, period_start)
-  where type = 'daily';
-create unique index reflections_unique_weekly on reflections(type, period_start)
-  where type = 'weekly';
+-- Plain composite unique (not the book's two partial indexes): Supabase's upsert
+-- sends on_conflict=type,period_start with no WHERE clause, which can't match a
+-- partial index's predicate, causing the second upsert for any (type, period_start)
+-- to fail. Plain composite keeps the same uniqueness semantics (type is in the
+-- key, so daily/weekly on the same date don't collide) and is upsert-compatible.
+create unique index reflections_unique_period on reflections(type, period_start);
 
 -- §5.6 HubSpot weekly snapshots for WoW delta computation.
 create table hubspot_snapshots (

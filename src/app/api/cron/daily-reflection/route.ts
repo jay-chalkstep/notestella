@@ -85,6 +85,9 @@ export async function POST(req: Request): Promise<Response> {
   const input: DailyReflectionInput = { date: today, meetings, notes };
   const reflection = await generateDailyReflection(input);
 
+  // pdf_filename is the intended delivery filename; no PDF is rendered or stored
+  // here. morning-brief re-renders from content jsonb at email time — content
+  // is the source of truth, the PDF is disposable.
   const pdfFilename = `reflection-daily-${today}.pdf`;
 
   const { data: inserted, error: insertErr } = await getSupabase()

@@ -2,6 +2,22 @@
 
 import { useState } from 'react';
 
+const SECRET_KEY = 'ns_read_secret';
+
+function getStoredSecret(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage.getItem(SECRET_KEY);
+}
+
+function ensureSecret(): string | null {
+  const existing = getStoredSecret();
+  if (existing) return existing;
+  const entered = window.prompt('Notestella password');
+  if (!entered) return null;
+  window.localStorage.setItem(SECRET_KEY, entered);
+  return entered;
+}
+
 type Citation = {
   ref: string;
   note_id: string;
@@ -30,11 +46,24 @@ export default function Home() {
     setResult(null);
     setOpenCitations(new Set());
     try {
+      const secret = ensureSecret();
+      if (!secret) {
+        setError('Password required');
+        setLoading(false);
+        return;
+      }
       const res = await fetch('/api/search', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${secret}`,
+        },
         body: JSON.stringify({ query: query.trim() }),
       });
+      if (res.status === 401) {
+        window.localStorage.removeItem(SECRET_KEY);
+        throw new Error('Invalid password — try again');
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);

@@ -37,9 +37,11 @@ export async function getTodaysEvents(date: Date): Promise<CalendarEvent[]> {
   return (data.items ?? [])
     .filter((e) => e.status !== 'cancelled')
     .filter((e): e is typeof e & { id: string } => Boolean(e.id))
+    // Skip all-day events: they have start.date but no start.dateTime. Parsing
+    // "YYYY-MM-DDT00:00:00" as a naked Date is ambiguous (UTC vs local on Node),
+    // and briefs for OOO/blocked-all-day events aren't useful anyway.
+    .filter((e) => Boolean(e.start?.dateTime && e.end?.dateTime))
     .map((e) => {
-      const startTime = e.start?.dateTime ?? (e.start?.date ? `${e.start.date}T00:00:00` : '');
-      const endTime = e.end?.dateTime ?? (e.end?.date ? `${e.end.date}T23:59:59` : '');
       const attendees: Attendee[] = (e.attendees ?? [])
         .filter((a): a is typeof a & { email: string } => Boolean(a.email))
         .map((a) => ({
@@ -53,8 +55,8 @@ export async function getTodaysEvents(date: Date): Promise<CalendarEvent[]> {
         recurringEventId: e.recurringEventId ?? undefined,
         title: e.summary ?? '(no title)',
         description: e.description ?? undefined,
-        startTime,
-        endTime,
+        startTime: e.start!.dateTime as string,
+        endTime: e.end!.dateTime as string,
         attendees,
       };
     });

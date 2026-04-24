@@ -57,7 +57,11 @@ const styles = StyleSheet.create({
     paddingLeft: 8,
     marginTop: 6,
   },
-  notesZone: { flexGrow: 1, minHeight: 380, marginTop: 8 },
+  // minHeight 200 (not 380): the fixed upper content + a heavy CRM block could
+  // otherwise push the notes zone onto page 2. 200pt still gives ~8 ruled lines
+  // on page 1 when CRM is heavy, and flexGrow claims the rest of the page when
+  // CRM is light, which is the common case.
+  notesZone: { flexGrow: 1, minHeight: 200, marginTop: 8 },
   notesLine: { height: 22, borderBottomWidth: 0.5, borderBottomColor: '#d4d4d4' },
   footer: {
     flexDirection: 'row',

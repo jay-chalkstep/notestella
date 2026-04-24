@@ -16,7 +16,7 @@ import type {
   WeeklyReflectionOutput,
 } from '@/lib/anthropic';
 import { sendPdfsToRemarkable } from '@/lib/resend';
-import { selectLens } from '@/lib/lens';
+import { loadPeople, selectLensWith, type PeopleMap } from '@/lib/lens';
 import {
   getCustomerLensData,
   getSellerLensData,
@@ -61,9 +61,10 @@ function fmtTime(iso: string): string {
 async function fetchCrmData(
   attendees: Attendee[],
   myEmail: string,
+  people: PeopleMap,
   cache: Map<string, BriefCrmData>
 ): Promise<BriefCrmData> {
-  const selection = await selectLens(attendees, myEmail);
+  const selection = selectLensWith(attendees, myEmail, people);
 
   if (selection.lens === 'none') return null;
 
@@ -141,7 +142,8 @@ async function loadPriors(seriesId: string, beforeIso: string): Promise<PriorMee
     return {
       date: formatInTimeZone(new Date(m.start_time), TZ, 'yyyy-MM-dd'),
       title: m.title,
-      summary: notes && notes.summaries.length > 0 ? notes.summaries.join(' ') : 'briefed only',
+      summary:
+        notes && notes.summaries.length > 0 ? notes.summaries.join('\n\n') : 'briefed only',
       decisions: notes?.decisions ?? [],
       action_items: notes?.action_items ?? [],
     };
@@ -150,6 +152,18 @@ async function loadPriors(seriesId: string, beforeIso: string): Promise<PriorMee
 
 export async function POST(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
+
+  // Fail loud when Phase 2 is half-configured. Without MY_EMAIL set,
+  // fetchCrmData silently returns null for every meeting and briefs ship with
+  // no CRM section — a fresh deploy without MY_EMAIL looks like Phase 2 just
+  // doesn't work.
+  const myEmail = process.env.MY_EMAIL;
+  if (process.env.HUBSPOT_PRIVATE_APP_TOKEN && !myEmail) {
+    return Response.json(
+      { error: 'MY_EMAIL is required when HUBSPOT_PRIVATE_APP_TOKEN is set' },
+      { status: 500 }
+    );
+  }
 
   const now = new Date();
   const today = formatInTimeZone(now, TZ, 'yyyy-MM-dd');
@@ -182,8 +196,29 @@ export async function POST(req: Request): Promise<Response> {
   const attachments: { filename: string; buffer: Buffer }[] = [];
   const perMeeting: PerMeetingResult[] = [];
   const briefedIds: string[] = [];
-  const myEmail = process.env.MY_EMAIL;
   const crmCache = new Map<string, BriefCrmData>();
+
+  // Pre-load the people table once for the union of all external attendees —
+  // one round trip instead of one per meeting.
+  let people: PeopleMap = new Map();
+  if (myEmail) {
+    const externalEmails = Array.from(
+      new Set(
+        events
+          .flatMap((e) => e.attendees)
+          .map((a) => a.email.toLowerCase())
+          .filter((e) => e !== myEmail.toLowerCase())
+      )
+    );
+    try {
+      people = await loadPeople(externalEmails);
+    } catch (err) {
+      console.error(
+        '[morning-brief] people preload failed; lens will default to customer/none',
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
 
   for (const event of events) {
     if (event.attendees.length === 0) {
@@ -200,7 +235,7 @@ export async function POST(req: Request): Promise<Response> {
       let crmData: BriefCrmData = null;
       if (myEmail) {
         try {
-          crmData = await fetchCrmData(event.attendees, myEmail, crmCache);
+          crmData = await fetchCrmData(event.attendees, myEmail, people, crmCache);
         } catch (err) {
           console.error('[morning-brief] CRM fetch failed; continuing without', {
             meeting_id: event.id,
@@ -307,54 +342,66 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // §5.8 Attach the most recent undelivered reflection.
-  let reflectionAttachedId: string | null = null;
+  // §5.8 Attach every undelivered reflection. Don't limit to one — Monday
+  // morning will typically have both Sunday's daily AND the just-generated
+  // weekly waiting; taking .limit(1) would orphan the other forever.
+  // PDFs are re-rendered from the content jsonb (source of truth); the
+  // pdf_filename column is just the intended delivery filename.
+  const reflectionAttachedIds: string[] = [];
   try {
-    const { data: refRow, error: refErr } = await getSupabase()
+    const { data: refRows, error: refErr } = await getSupabase()
       .from('reflections')
       .select('id, type, period_start, period_end, content, pdf_filename')
       .is('delivered_at', null)
-      .order('period_end', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .order('period_end', { ascending: true });
     if (refErr) {
       console.error('[morning-brief] reflections lookup failed', refErr.message);
-    } else if (refRow) {
-      const row = refRow as {
+    } else {
+      const rows = (refRows ?? []) as Array<{
         id: string;
         type: 'daily' | 'weekly';
         period_start: string;
         period_end: string;
         content: unknown;
         pdf_filename: string | null;
-      };
-      if (row.type === 'daily') {
-        const buf = await renderDailyReflectionPdf({
-          date: row.period_start,
-          formattedDate: formatInTimeZone(
-            fromZonedTime(`${row.period_start}T12:00:00`, TZ),
-            TZ,
-            'EEEE, MMM d'
-          ),
-          reflection: row.content as DailyReflectionOutput,
-        });
-        attachments.push({
-          filename: row.pdf_filename ?? `reflection-daily-${row.period_start}.pdf`,
-          buffer: buf,
-        });
-        reflectionAttachedId = row.id;
-      } else if (row.type === 'weekly') {
-        const buf = await renderWeeklyReflectionPdf({
-          period_start: row.period_start,
-          period_end: row.period_end,
-          formattedRange: `${formatInTimeZone(fromZonedTime(`${row.period_start}T12:00:00`, TZ), TZ, 'MMM d')} – ${formatInTimeZone(fromZonedTime(`${row.period_end}T12:00:00`, TZ), TZ, 'MMM d')}`,
-          reflection: row.content as WeeklyReflectionOutput,
-        });
-        attachments.push({
-          filename: row.pdf_filename ?? `reflection-weekly-${row.period_start}.pdf`,
-          buffer: buf,
-        });
-        reflectionAttachedId = row.id;
+      }>;
+      for (const row of rows) {
+        try {
+          if (row.type === 'daily') {
+            const buf = await renderDailyReflectionPdf({
+              date: row.period_start,
+              formattedDate: formatInTimeZone(
+                fromZonedTime(`${row.period_start}T12:00:00`, TZ),
+                TZ,
+                'EEEE, MMM d'
+              ),
+              reflection: row.content as DailyReflectionOutput,
+            });
+            attachments.push({
+              filename: row.pdf_filename ?? `reflection-daily-${row.period_start}.pdf`,
+              buffer: buf,
+            });
+            reflectionAttachedIds.push(row.id);
+          } else if (row.type === 'weekly') {
+            const buf = await renderWeeklyReflectionPdf({
+              period_start: row.period_start,
+              period_end: row.period_end,
+              formattedRange: `${formatInTimeZone(fromZonedTime(`${row.period_start}T12:00:00`, TZ), TZ, 'MMM d')} – ${formatInTimeZone(fromZonedTime(`${row.period_end}T12:00:00`, TZ), TZ, 'MMM d')}`,
+              reflection: row.content as WeeklyReflectionOutput,
+            });
+            attachments.push({
+              filename: row.pdf_filename ?? `reflection-weekly-${row.period_start}.pdf`,
+              buffer: buf,
+            });
+            reflectionAttachedIds.push(row.id);
+          }
+        } catch (err) {
+          console.error('[morning-brief] reflection render failed', {
+            reflection_id: row.id,
+            type: row.type,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
   } catch (err) {
@@ -386,12 +433,12 @@ export async function POST(req: Request): Promise<Response> {
           .eq('brief_date', today);
       }
 
-      if (reflectionAttachedId) {
+      if (reflectionAttachedIds.length > 0) {
         const nowIso = new Date().toISOString();
         const { error: rUpdErr } = await getSupabase()
           .from('reflections')
           .update({ delivered_at: nowIso })
-          .eq('id', reflectionAttachedId);
+          .in('id', reflectionAttachedIds);
         if (rUpdErr) {
           console.error('[morning-brief] reflection delivered_at update failed', rUpdErr.message);
         }
@@ -412,7 +459,7 @@ export async function POST(req: Request): Promise<Response> {
       event_count: events.length,
       brief_count: briefedIds.length,
       overview_attached: overviewAttached,
-      reflection_attached: reflectionAttachedId,
+      reflection_attached: reflectionAttachedIds,
       delivered,
       per_meeting: perMeeting,
     },

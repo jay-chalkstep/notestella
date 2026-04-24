@@ -4,6 +4,18 @@ import { generateSearchAnswer, type SearchCandidate } from '@/lib/anthropic';
 
 type SearchBody = { query: string };
 
+function unauthorized(): Response {
+  return new Response('Unauthorized', { status: 401 });
+}
+
+function readSecretOk(req: Request): boolean {
+  const secret = process.env.NOTESTELLA_READ_SECRET;
+  // Fail closed: if the env var isn't set, the route refuses all traffic.
+  // Set NOTESTELLA_READ_SECRET in Vercel before deploying the homepage publicly.
+  if (!secret) return false;
+  return req.headers.get('authorization') === `Bearer ${secret}`;
+}
+
 type MatchRow = {
   id: string;
   meeting_id: string;
@@ -15,6 +27,8 @@ type MatchRow = {
 };
 
 export async function POST(req: Request): Promise<Response> {
+  if (!readSecretOk(req)) return unauthorized();
+
   let body: SearchBody;
   try {
     body = (await req.json()) as SearchBody;

@@ -173,25 +173,25 @@ function WeeklyReflectionDoc(props: WeeklyReflectionPdfInput & { qrDataUrl: stri
                 <Text style={styles.cellLabel}>Pipeline change</Text>
                 <Text style={styles.cellValue}>{reflection.hubspot_deltas.pipeline_change}</Text>
               </View>
-              {reflection.hubspot_deltas.deals_moved.map((d, i) => (
-                <View key={`m${i}`} style={styles.row}>
-                  <Text style={styles.cellLabel}>Moved: {d}</Text>
-                  <Text style={styles.cellValue}></Text>
-                </View>
-              ))}
-              {reflection.hubspot_deltas.deals_gone_cold.map((d, i) => (
-                <View key={`c${i}`} style={styles.row}>
-                  <Text style={styles.cellLabel}>Cold: {d}</Text>
-                  <Text style={styles.cellValue}></Text>
-                </View>
-              ))}
-              {reflection.hubspot_deltas.rep_anomalies.map((r, i) => (
-                <View key={`r${i}`} style={styles.row}>
-                  <Text style={styles.cellLabel}>{r}</Text>
-                  <Text style={styles.cellValue}></Text>
-                </View>
-              ))}
             </View>
+            {reflection.hubspot_deltas.deals_moved.length > 0 && (
+              <View style={{ marginTop: 4 }}>
+                <Text style={[styles.body, { fontFamily: 'Helvetica-Bold' }]}>Moved</Text>
+                <Bullets items={reflection.hubspot_deltas.deals_moved} />
+              </View>
+            )}
+            {reflection.hubspot_deltas.deals_gone_cold.length > 0 && (
+              <View style={{ marginTop: 4 }}>
+                <Text style={[styles.body, { fontFamily: 'Helvetica-Bold' }]}>Gone cold</Text>
+                <Bullets items={reflection.hubspot_deltas.deals_gone_cold} />
+              </View>
+            )}
+            {reflection.hubspot_deltas.rep_anomalies.length > 0 && (
+              <View style={{ marginTop: 4 }}>
+                <Text style={[styles.body, { fontFamily: 'Helvetica-Bold' }]}>Rep anomalies</Text>
+                <Bullets items={reflection.hubspot_deltas.rep_anomalies} />
+              </View>
+            )}
           </View>
         )}
 
