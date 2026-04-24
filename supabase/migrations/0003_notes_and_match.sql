@@ -21,10 +21,8 @@ create index notes_note_date_idx on notes(note_date desc);
 -- IVFFlat is fine for personal volume. Revisit if scale changes.
 -- NOTE: IVFFlat trains centroids from existing rows. Creating it on an empty
 -- table produces a degenerate index that still answers queries but without
--- acceleration. After ~100 notes exist, drop and recreate this index for
--- meaningful centroids:
---   drop index notes_embedding_idx;
---   create index notes_embedding_idx on notes using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+-- acceleration. After ~100 notes exist, rebuild in place:
+--   REINDEX INDEX notes_embedding_idx;
 create index notes_embedding_idx on notes using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 
 create or replace function match_notes(
