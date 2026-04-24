@@ -1,5 +1,8 @@
 {
   "crons": [
-    { "path": "/api/cron/morning-brief", "schedule": "45 10 * * *" }
+    { "path": "/api/cron/morning-brief", "schedule": "45 10 * * *" },
+    { "path": "/api/cron/daily-reflection", "schedule": "30 3 * * *" },
+    { "path": "/api/cron/weekly-reflection", "schedule": "0 4 * * 1" },
+    { "path": "/api/cron/hubspot-snapshot", "schedule": "0 5 * * 0" }
   ]
 }

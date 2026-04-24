@@ -1,15 +1,28 @@
-import { formatInTimeZone } from 'date-fns-tz';
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import { getSupabase } from '@/lib/supabase';
 import { getTodaysEvents, deriveSeriesId } from '@/lib/google-calendar';
 import {
   generateMeetingBrief,
   generateDailyOverview,
   type PriorMeeting,
+  type BriefCrmData,
 } from '@/lib/anthropic';
 import { renderMeetingBriefPdf } from '@/pdf/meeting-brief';
 import { renderDailyOverviewPdf } from '@/pdf/daily-overview';
+import { renderDailyReflectionPdf } from '@/pdf/daily-reflection';
+import { renderWeeklyReflectionPdf } from '@/pdf/weekly-reflection';
+import type {
+  DailyReflectionOutput,
+  WeeklyReflectionOutput,
+} from '@/lib/anthropic';
 import { sendPdfsToRemarkable } from '@/lib/resend';
-import { encodeFilename, type CalendarEvent } from '@/types';
+import { selectLens } from '@/lib/lens';
+import {
+  getCustomerLensData,
+  getSellerLensData,
+  getExecutiveLensData,
+} from '@/lib/hubspot';
+import { encodeFilename, type Attendee, type CalendarEvent } from '@/types';
 
 const TZ = 'America/Denver';
 
@@ -45,22 +58,94 @@ function fmtTime(iso: string): string {
   return formatInTimeZone(new Date(iso), TZ, 'HH:mm');
 }
 
+async function fetchCrmData(
+  attendees: Attendee[],
+  myEmail: string,
+  cache: Map<string, BriefCrmData>
+): Promise<BriefCrmData> {
+  const selection = await selectLens(attendees, myEmail);
+
+  if (selection.lens === 'none') return null;
+
+  switch (selection.lens) {
+    case 'customer': {
+      const externalEmails = attendees
+        .map((a) => a.email)
+        .filter((e) => e.toLowerCase() !== myEmail.toLowerCase());
+      const key = `customer:${externalEmails.sort().join(',')}`;
+      if (cache.has(key)) return cache.get(key)!;
+      const data = await getCustomerLensData(externalEmails);
+      cache.set(key, data);
+      return data;
+    }
+    case 'seller': {
+      if (!selection.focusPersonOwnerId) return null;
+      const key = `seller:${selection.focusPersonOwnerId}`;
+      if (cache.has(key)) return cache.get(key)!;
+      const data = await getSellerLensData(selection.focusPersonOwnerId);
+      cache.set(key, data);
+      return data;
+    }
+    case 'sales_leader': {
+      const key = 'exec';
+      if (cache.has(key)) return cache.get(key)!;
+      const data = await getExecutiveLensData();
+      cache.set(key, data);
+      return data;
+    }
+  }
+}
+
 async function loadPriors(seriesId: string, beforeIso: string): Promise<PriorMeeting[]> {
-  const { data, error } = await getSupabase()
+  const { data: meetingRows, error } = await getSupabase()
     .from('meetings')
-    .select('start_time, title')
+    .select('id, start_time, title')
     .eq('series_id', seriesId)
     .lt('start_time', beforeIso)
     .order('start_time', { ascending: false })
     .limit(5);
   if (error) throw new Error(`priors query: ${error.message}`);
-  return (data ?? []).map((row) => ({
-    date: formatInTimeZone(new Date(row.start_time as string), TZ, 'yyyy-MM-dd'),
-    title: row.title as string,
-    summary: 'briefed only',
-    decisions: [],
-    action_items: [],
-  }));
+  const meetings = (meetingRows ?? []) as Array<{ id: string; start_time: string; title: string }>;
+  if (meetings.length === 0) return [];
+
+  const ids = meetings.map((m) => m.id);
+  const { data: noteRows, error: notesErr } = await getSupabase()
+    .from('notes')
+    .select('meeting_id, summary, decisions, action_items')
+    .in('meeting_id', ids);
+  if (notesErr) throw new Error(`prior notes query: ${notesErr.message}`);
+
+  const notesByMeeting = new Map<
+    string,
+    { summaries: string[]; decisions: unknown[]; action_items: unknown[] }
+  >();
+  for (const n of (noteRows ?? []) as Array<{
+    meeting_id: string;
+    summary: string | null;
+    decisions: unknown[];
+    action_items: unknown[];
+  }>) {
+    const agg = notesByMeeting.get(n.meeting_id) ?? {
+      summaries: [],
+      decisions: [],
+      action_items: [],
+    };
+    if (n.summary) agg.summaries.push(n.summary);
+    agg.decisions.push(...(n.decisions ?? []));
+    agg.action_items.push(...(n.action_items ?? []));
+    notesByMeeting.set(n.meeting_id, agg);
+  }
+
+  return meetings.map((m) => {
+    const notes = notesByMeeting.get(m.id);
+    return {
+      date: formatInTimeZone(new Date(m.start_time), TZ, 'yyyy-MM-dd'),
+      title: m.title,
+      summary: notes && notes.summaries.length > 0 ? notes.summaries.join(' ') : 'briefed only',
+      decisions: notes?.decisions ?? [],
+      action_items: notes?.action_items ?? [],
+    };
+  });
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -97,6 +182,8 @@ export async function POST(req: Request): Promise<Response> {
   const attachments: { filename: string; buffer: Buffer }[] = [];
   const perMeeting: PerMeetingResult[] = [];
   const briefedIds: string[] = [];
+  const myEmail = process.env.MY_EMAIL;
+  const crmCache = new Map<string, BriefCrmData>();
 
   for (const event of events) {
     if (event.attendees.length === 0) {
@@ -110,6 +197,17 @@ export async function POST(req: Request): Promise<Response> {
     try {
       const seriesId = deriveSeriesId(event);
       const priors = await loadPriors(seriesId, now.toISOString());
+      let crmData: BriefCrmData = null;
+      if (myEmail) {
+        try {
+          crmData = await fetchCrmData(event.attendees, myEmail, crmCache);
+        } catch (err) {
+          console.error('[morning-brief] CRM fetch failed; continuing without', {
+            meeting_id: event.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       const brief = await generateMeetingBrief({
         title: event.title,
         date: today,
@@ -118,6 +216,7 @@ export async function POST(req: Request): Promise<Response> {
         attendees: event.attendees,
         description: event.description,
         priors,
+        crmData,
       });
       const filename = encodeFilename(today, event.title, event.id);
       const buffer = await renderMeetingBriefPdf({
@@ -208,6 +307,63 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // §5.8 Attach the most recent undelivered reflection.
+  let reflectionAttachedId: string | null = null;
+  try {
+    const { data: refRow, error: refErr } = await getSupabase()
+      .from('reflections')
+      .select('id, type, period_start, period_end, content, pdf_filename')
+      .is('delivered_at', null)
+      .order('period_end', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (refErr) {
+      console.error('[morning-brief] reflections lookup failed', refErr.message);
+    } else if (refRow) {
+      const row = refRow as {
+        id: string;
+        type: 'daily' | 'weekly';
+        period_start: string;
+        period_end: string;
+        content: unknown;
+        pdf_filename: string | null;
+      };
+      if (row.type === 'daily') {
+        const buf = await renderDailyReflectionPdf({
+          date: row.period_start,
+          formattedDate: formatInTimeZone(
+            fromZonedTime(`${row.period_start}T12:00:00`, TZ),
+            TZ,
+            'EEEE, MMM d'
+          ),
+          reflection: row.content as DailyReflectionOutput,
+        });
+        attachments.push({
+          filename: row.pdf_filename ?? `reflection-daily-${row.period_start}.pdf`,
+          buffer: buf,
+        });
+        reflectionAttachedId = row.id;
+      } else if (row.type === 'weekly') {
+        const buf = await renderWeeklyReflectionPdf({
+          period_start: row.period_start,
+          period_end: row.period_end,
+          formattedRange: `${formatInTimeZone(fromZonedTime(`${row.period_start}T12:00:00`, TZ), TZ, 'MMM d')} – ${formatInTimeZone(fromZonedTime(`${row.period_end}T12:00:00`, TZ), TZ, 'MMM d')}`,
+          reflection: row.content as WeeklyReflectionOutput,
+        });
+        attachments.push({
+          filename: row.pdf_filename ?? `reflection-weekly-${row.period_start}.pdf`,
+          buffer: buf,
+        });
+        reflectionAttachedId = row.id;
+      }
+    }
+  } catch (err) {
+    console.error(
+      '[morning-brief] reflection attach failed',
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
   let delivered = false;
   if (attachments.length > 0) {
     try {
@@ -229,6 +385,17 @@ export async function POST(req: Request): Promise<Response> {
           .update({ delivered_to_remarkable: true, delivered_at: nowIso })
           .eq('brief_date', today);
       }
+
+      if (reflectionAttachedId) {
+        const nowIso = new Date().toISOString();
+        const { error: rUpdErr } = await getSupabase()
+          .from('reflections')
+          .update({ delivered_at: nowIso })
+          .eq('id', reflectionAttachedId);
+        if (rUpdErr) {
+          console.error('[morning-brief] reflection delivered_at update failed', rUpdErr.message);
+        }
+      }
     } catch (err) {
       console.error(
         '[morning-brief] email send failed',
@@ -245,6 +412,7 @@ export async function POST(req: Request): Promise<Response> {
       event_count: events.length,
       brief_count: briefedIds.length,
       overview_attached: overviewAttached,
+      reflection_attached: reflectionAttachedId,
       delivered,
       per_meeting: perMeeting,
     },

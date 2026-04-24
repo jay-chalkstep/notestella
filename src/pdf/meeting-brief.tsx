@@ -9,7 +9,7 @@ import {
 } from '@react-pdf/renderer';
 import type { Attendee, QrPayload } from '@/types';
 import { generateQrDataUrl } from '@/lib/qr';
-import type { BriefOutput } from '@/lib/anthropic';
+import type { BriefOutput, CrmSection } from '@/lib/anthropic';
 
 const ACCENT = '#B85C38';
 const INK = '#1a1a1a';
@@ -43,6 +43,20 @@ const styles = StyleSheet.create({
   bullet: { flexDirection: 'row', marginBottom: 2 },
   bulletDot: { width: 10, fontSize: 10 },
   bulletText: { flex: 1, fontSize: 10, lineHeight: 1.35 },
+  crmHeader: {
+    fontSize: 8,
+    fontFamily: 'Helvetica-Bold',
+    color: MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  crmFlags: {
+    borderLeftWidth: 2,
+    borderLeftColor: ACCENT,
+    paddingLeft: 8,
+    marginTop: 6,
+  },
   notesZone: { flexGrow: 1, minHeight: 380, marginTop: 8 },
   notesLine: { height: 22, borderBottomWidth: 0.5, borderBottomColor: '#d4d4d4' },
   footer: {
@@ -71,6 +85,41 @@ function Bullets({ items }: { items: string[] }) {
           <Text style={styles.bulletText}>{it}</Text>
         </View>
       ))}
+    </View>
+  );
+}
+
+const LENS_LABELS: Record<CrmSection['lens'], string> = {
+  customer: 'CRM — Customer view',
+  seller: 'CRM — Seller 1:1',
+  sales_leader: 'CRM — Executive view',
+  none: 'CRM',
+};
+
+const MAX_FACTS = 6;
+const MAX_FLAGS = 6;
+
+function truncate(items: string[], max: number): string[] {
+  if (items.length <= max) return items;
+  const head = items.slice(0, max);
+  head.push(`+ ${items.length - max} more`);
+  return head;
+}
+
+function CrmBlock({ section }: { section: CrmSection }) {
+  if (section.lens === 'none') return null;
+  if (section.facts.length === 0 && section.flags.length === 0) return null;
+  const facts = truncate(section.facts, MAX_FACTS);
+  const flags = truncate(section.flags, MAX_FLAGS);
+  return (
+    <View style={styles.section}>
+      <Text style={styles.crmHeader}>{LENS_LABELS[section.lens]}</Text>
+      {facts.length > 0 && <Bullets items={facts} />}
+      {flags.length > 0 && (
+        <View style={styles.crmFlags}>
+          <Bullets items={flags} />
+        </View>
+      )}
     </View>
   );
 }
@@ -133,7 +182,7 @@ function MeetingBriefDoc(props: MeetingBriefPdfInput & { qrDataUrl: string }) {
           </View>
         )}
 
-        {/* CRM placeholder — populated in Phase 2 */}
+        {brief.crm_section && <CrmBlock section={brief.crm_section} />}
 
         <View style={styles.notesZone}>
           {Array.from({ length: notesLineCount }).map((_, i) => (
