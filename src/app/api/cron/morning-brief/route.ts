@@ -6,6 +6,7 @@ import {
   generateDailyOverview,
   type PriorMeeting,
   type BriefCrmData,
+  type PersonContext,
 } from '@/lib/anthropic';
 import { renderMeetingBriefPdf } from '@/pdf/meeting-brief';
 import { renderDailyOverviewPdf } from '@/pdf/daily-overview';
@@ -23,6 +24,11 @@ import {
   getExecutiveLensData,
 } from '@/lib/hubspot';
 import { encodeFilename, type Attendee, type CalendarEvent } from '@/types';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 const TZ = 'America/Denver';
 
@@ -150,20 +156,14 @@ async function loadPriors(seriesId: string, beforeIso: string): Promise<PriorMee
   });
 }
 
-export async function POST(req: Request): Promise<Response> {
+async function run(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
 
-  // Fail loud when Phase 2 is half-configured. Without MY_EMAIL set,
-  // fetchCrmData silently returns null for every meeting and briefs ship with
-  // no CRM section — a fresh deploy without MY_EMAIL looks like Phase 2 just
-  // doesn't work.
-  const myEmail = process.env.MY_EMAIL;
-  if (process.env.HUBSPOT_PRIVATE_APP_TOKEN && !myEmail) {
-    return Response.json(
-      { error: 'MY_EMAIL is required when HUBSPOT_PRIVATE_APP_TOKEN is set' },
-      { status: 500 }
-    );
-  }
+  // getEnv() throws on the first invalid env, including the
+  // MY_EMAIL-required-when-HubSpot-token-set rule (see env.ts superRefine),
+  // so we don't need a duplicate check here.
+  const env = getEnv();
+  const myEmail = env.MY_EMAIL;
 
   const now = new Date();
   const today = formatInTimeZone(now, TZ, 'yyyy-MM-dd');
@@ -243,6 +243,17 @@ export async function POST(req: Request): Promise<Response> {
           });
         }
       }
+      // Pull hand-curated notes for any attendee with a row in `people.notes`.
+      // This is the MVP slice of the seed-context proposal: no new tables, just
+      // wire up the column that already exists.
+      const personContext: PersonContext[] = [];
+      for (const a of event.attendees) {
+        const row = people.get(a.email.toLowerCase());
+        if (!row?.notes || row.notes.trim().length === 0) continue;
+        const entry: PersonContext = { email: a.email, notes: row.notes.trim() };
+        if (a.name) entry.name = a.name;
+        personContext.push(entry);
+      }
       const brief = await generateMeetingBrief({
         title: event.title,
         date: today,
@@ -252,6 +263,7 @@ export async function POST(req: Request): Promise<Response> {
         description: event.description,
         priors,
         crmData,
+        personContext,
       });
       const filename = encodeFilename(today, event.title, event.id);
       const buffer = await renderMeetingBriefPdf({
@@ -349,10 +361,13 @@ export async function POST(req: Request): Promise<Response> {
   // pdf_filename column is just the intended delivery filename.
   const reflectionAttachedIds: string[] = [];
   try {
+    // Skip reflections that already failed to render once. A broken template
+    // or content-schema drift would otherwise cause perpetual retries.
     const { data: refRows, error: refErr } = await getSupabase()
       .from('reflections')
       .select('id, type, period_start, period_end, content, pdf_filename')
       .is('delivered_at', null)
+      .is('delivery_failed_at', null)
       .order('period_end', { ascending: true });
     if (refErr) {
       console.error('[morning-brief] reflections lookup failed', refErr.message);
@@ -396,11 +411,25 @@ export async function POST(req: Request): Promise<Response> {
             reflectionAttachedIds.push(row.id);
           }
         } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
           console.error('[morning-brief] reflection render failed', {
             reflection_id: row.id,
             type: row.type,
-            error: err instanceof Error ? err.message : String(err),
+            error: msg,
           });
+          const { error: failErr } = await getSupabase()
+            .from('reflections')
+            .update({
+              delivery_failed_at: new Date().toISOString(),
+              delivery_error: msg.slice(0, 500),
+            })
+            .eq('id', row.id);
+          if (failErr) {
+            console.error(
+              '[morning-brief] delivery_failed_at update failed',
+              failErr.message
+            );
+          }
         }
       }
     }
@@ -465,4 +494,12 @@ export async function POST(req: Request): Promise<Response> {
     },
     { status }
   );
+}
+
+export async function GET(req: Request): Promise<Response> {
+  return run(req);
+}
+
+export async function POST(req: Request): Promise<Response> {
+  return run(req);
 }

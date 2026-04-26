@@ -7,6 +7,10 @@ import {
   type DailyReflectionNote,
 } from '@/lib/anthropic';
 import type { Attendee } from '@/types';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const TZ = 'America/Denver';
 
@@ -20,8 +24,9 @@ function bearerOk(req: Request): boolean {
   return req.headers.get('authorization') === `Bearer ${secret}`;
 }
 
-export async function POST(req: Request): Promise<Response> {
+async function run(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
+  getEnv();
 
   const now = new Date();
   const today = formatInTimeZone(now, TZ, 'yyyy-MM-dd');
@@ -118,4 +123,12 @@ export async function POST(req: Request): Promise<Response> {
     },
     { status: 200 }
   );
+}
+
+export async function GET(req: Request): Promise<Response> {
+  return run(req);
+}
+
+export async function POST(req: Request): Promise<Response> {
+  return run(req);
 }

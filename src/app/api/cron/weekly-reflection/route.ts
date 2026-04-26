@@ -8,6 +8,11 @@ import {
   type HubspotSnapshotDelta,
 } from '@/lib/anthropic';
 import type { Attendee } from '@/types';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 const TZ = 'America/Denver';
 
@@ -22,8 +27,8 @@ function bearerOk(req: Request): boolean {
 }
 
 // Monday 00:00 MT through Sunday 23:59 MT for the week ending on `ref` (which is
-// the Sunday the cron fires on).
-function weekBounds(ref: Date): {
+// the Sunday the cron fires on). Exported for unit tests.
+export function weekBounds(ref: Date): {
   mondayIso: string;
   sundayIso: string;
   mondayDate: string;
@@ -140,8 +145,9 @@ async function loadHubspotDelta(): Promise<HubspotSnapshotDelta | null> {
   };
 }
 
-export async function POST(req: Request): Promise<Response> {
+async function run(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
+  getEnv();
 
   const now = new Date();
   const { mondayDate, sundayDate, mondayStartUtc, sundayEndUtc } = weekBounds(now);
@@ -208,4 +214,12 @@ export async function POST(req: Request): Promise<Response> {
     },
     { status: 200 }
   );
+}
+
+export async function GET(req: Request): Promise<Response> {
+  return run(req);
+}
+
+export async function POST(req: Request): Promise<Response> {
+  return run(req);
 }

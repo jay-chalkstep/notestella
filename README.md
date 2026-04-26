@@ -124,23 +124,25 @@ hubspot_snapshots).
 
 ### Smoke tests
 
-Hit each cron route locally with the `CRON_SECRET`:
+Hit each cron route locally with the `CRON_SECRET`. Use `GET` to mirror what
+Vercel cron actually sends in prod (the routes accept both, but a passing GET
+is the only proof that prod will succeed):
 
 ```bash
 # Morning brief — full flow: calendar → briefs → overview → email
-curl -X POST http://localhost:3000/api/cron/morning-brief \
+curl http://localhost:3000/api/cron/morning-brief \
   -H "Authorization: Bearer $CRON_SECRET"
 
 # Daily reflection — needs today's meetings + notes in Supabase
-curl -X POST http://localhost:3000/api/cron/daily-reflection \
+curl http://localhost:3000/api/cron/daily-reflection \
   -H "Authorization: Bearer $CRON_SECRET"
 
 # Weekly reflection — computes Mon–Sun of the week containing today in MT
-curl -X POST http://localhost:3000/api/cron/weekly-reflection \
+curl http://localhost:3000/api/cron/weekly-reflection \
   -H "Authorization: Bearer $CRON_SECRET"
 
 # HubSpot snapshot — writes today's pipeline + rep_activity
-curl -X POST http://localhost:3000/api/cron/hubspot-snapshot \
+curl http://localhost:3000/api/cron/hubspot-snapshot \
   -H "Authorization: Bearer $CRON_SECRET"
 ```
 
@@ -189,6 +191,33 @@ insert into people (email, role, hubspot_owner_id, display_name) values
 `hubspot_owner_id` is required for the seller lens to query their pipeline;
 get it from HubSpot → Settings → Users & Teams → each user's URL.
 
+`people.notes` is a free-text column on the same table — anything you put
+there ("tends to skip prep, lead with deal status") gets passed to the brief
+generator alongside priors and CRM data. Two to three sentences per attendee
+is the right dose. Wired up in §3 of the meeting brief prompt; the column was
+in the schema since 0002 but only started feeding the brief in this revision.
+
+### IVFFlat index reindex (after ~3 weeks)
+
+`notes_embedding_idx` is an IVFFlat index trained at migration time when the
+`notes` table was empty, so its centroids are degenerate. After your first
+~100 notes accumulate (roughly 3 weeks of evening syncs), run:
+
+```sql
+reindex index notes_embedding_idx;
+```
+
+…in the Supabase SQL editor. One-time fix; re-train again only if you wipe
+and re-embed.
+
+### Voyage embedding model
+
+`src/lib/voyage.ts` calls `voyage-3` (1024 dims, matches the schema). Voyage
+has since released `voyage-3.5` and `voyage-3-large`. The current model still
+works fine and is cheap; upgrading would require re-embedding every existing
+note (delete and rewrite the `embedding` column) plus a schema change if the
+new model's dim count differs. Defer until search quality is the bottleneck.
+
 ### Environment variables
 
 Set in `.env.local` for dev and mirror to Vercel Project Settings for prod.
@@ -197,12 +226,15 @@ Set in `.env.local` for dev and mirror to Vercel Project Settings for prod.
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_CALENDAR_ID`
 - `RESEND_API_KEY`, `RESEND_FROM_ADDRESS`, `REMARKABLE_EMAIL`
-- `HUBSPOT_PRIVATE_APP_TOKEN`, `HUBSPOT_PORTAL_ID`, `MY_EMAIL`
+- `HUBSPOT_PRIVATE_APP_TOKEN`, `MY_EMAIL`
 - `VOYAGE_API_KEY`
 
-`MY_EMAIL` is required whenever `HUBSPOT_PRIVATE_APP_TOKEN` is set —
-morning-brief fails loud if you forget it. `NOTESTELLA_READ_SECRET` fails
-closed: if unset, `/api/search` returns 401 to everyone including you.
+`src/lib/env.ts` validates the full set with zod at the top of every cron
+request. A missing or malformed required key returns a 500 with the failing
+keys named in the response — no more "Resend send failed: invalid api key"
+guesswork. `MY_EMAIL` is required whenever `HUBSPOT_PRIVATE_APP_TOKEN` is set
+(enforced by superRefine). `NOTESTELLA_READ_SECRET` fails closed: if unset,
+`/api/search` returns 401 to everyone including you.
 
 ### GitHub Actions secrets (evening sync)
 

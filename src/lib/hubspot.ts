@@ -386,19 +386,29 @@ export async function fetchOwnerActivityCounts(
     limit: 1,
   });
 
+  // Log per-endpoint failures rather than silently coercing to 0 — without
+  // logging, an upstream HubSpot 5xx looks identical to "no activity" and gets
+  // reported as a 100% drop vs. last week, polluting anomaly detection.
+  const safeFetch = async (path: string): Promise<EngagementSearchResult> => {
+    try {
+      return await hsFetch<EngagementSearchResult>(path, {
+        method: 'POST',
+        body: JSON.stringify(bodyFor('hs_timestamp')),
+      });
+    } catch (err) {
+      console.error('[hubspot] engagement search failed', {
+        path,
+        owner_id: ownerId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { total: 0 };
+    }
+  };
+
   const [emails, calls, meetings] = await Promise.all([
-    hsFetch<EngagementSearchResult>('/crm/v3/objects/emails/search', {
-      method: 'POST',
-      body: JSON.stringify(bodyFor('hs_timestamp')),
-    }).catch(() => ({ total: 0 })),
-    hsFetch<EngagementSearchResult>('/crm/v3/objects/calls/search', {
-      method: 'POST',
-      body: JSON.stringify(bodyFor('hs_timestamp')),
-    }).catch(() => ({ total: 0 })),
-    hsFetch<EngagementSearchResult>('/crm/v3/objects/meetings/search', {
-      method: 'POST',
-      body: JSON.stringify(bodyFor('hs_timestamp')),
-    }).catch(() => ({ total: 0 })),
+    safeFetch('/crm/v3/objects/emails/search'),
+    safeFetch('/crm/v3/objects/calls/search'),
+    safeFetch('/crm/v3/objects/meetings/search'),
   ]);
 
   return {
@@ -413,26 +423,54 @@ export async function fetchOwnerActivityCounts(
 export async function getExecutiveLensData(windowDays = 7): Promise<ExecutiveLensData> {
   const windowStart = new Date(Date.now() - windowDays * 86_400_000).toISOString();
 
-  // All deals (open + recently closed) in a single search; we partition client-side.
-  const dealSearch = await hsFetch<DealSearchResult>(
-    '/crm/v3/objects/deals/search',
-    {
+  const dealProperties = [
+    'dealname',
+    'dealstage',
+    'amount',
+    'closedate',
+    'notes_last_updated',
+    'hs_lastmodifieddate',
+  ];
+
+  // Two queries instead of one: an unfiltered top-100-by-amount mixes large
+  // historical closed-won deals into the pipeline rollup and crowds out current
+  // open deals. Filter by `hs_is_closed` (HubSpot's built-in flag) so the
+  // pipeline view is open-only and won/lost counts pull from a separate
+  // recently-closed-in-window query.
+  const [openSearch, closedSearch] = await Promise.all([
+    hsFetch<DealSearchResult>('/crm/v3/objects/deals/search', {
       method: 'POST',
       body: JSON.stringify({
-        properties: [
-          'dealname',
-          'dealstage',
-          'amount',
-          'closedate',
-          'notes_last_updated',
-          'hs_lastmodifieddate',
+        filterGroups: [
+          {
+            filters: [
+              { propertyName: 'hs_is_closed', operator: 'EQ', value: 'false' },
+            ],
+          },
         ],
+        properties: dealProperties,
         associations: ['companies'],
         limit: 100,
         sorts: [{ propertyName: 'amount', direction: 'DESCENDING' }],
       }),
-    }
-  );
+    }),
+    hsFetch<DealSearchResult>('/crm/v3/objects/deals/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        filterGroups: [
+          {
+            filters: [
+              { propertyName: 'hs_is_closed', operator: 'EQ', value: 'true' },
+              { propertyName: 'closedate', operator: 'GTE', value: windowStart },
+            ],
+          },
+        ],
+        properties: dealProperties,
+        limit: 100,
+        sorts: [{ propertyName: 'closedate', direction: 'DESCENDING' }],
+      }),
+    }),
+  ]);
 
   type StageBucket = { stage: string; count: number; total_amount: number };
   const byStage = new Map<string, StageBucket>();
@@ -443,9 +481,9 @@ export async function getExecutiveLensData(windowDays = 7): Promise<ExecutiveLen
   let lostCount = 0;
   let lostAmount = 0;
 
-  // We need company names for top-open-deals display. Collect ids then batch-read.
+  // Company names for top-open-deals display — batch-read all referenced ids.
   const pendingCompanyIds = new Set<string>();
-  for (const d of dealSearch.results) {
+  for (const d of openSearch.results) {
     const companyId = d.associations?.companies?.results?.[0]?.id;
     if (companyId) pendingCompanyIds.add(companyId);
   }
@@ -461,25 +499,10 @@ export async function getExecutiveLensData(windowDays = 7): Promise<ExecutiveLen
     companyNameById = new Map(batch.results.map((r) => [r.id, r.properties.name ?? r.id]));
   }
 
-  for (const d of dealSearch.results) {
+  for (const d of openSearch.results) {
     const stage = d.properties.dealstage ?? 'unknown';
     const amt = toNum(d.properties.amount) ?? 0;
-    const closed = isClosedStage(stage);
     const closeDateIso = d.properties.closedate ?? undefined;
-    const inWindow = closeDateIso ? new Date(closeDateIso).getTime() >= new Date(windowStart).getTime() : false;
-
-    if (closed) {
-      if (inWindow) {
-        if (stage.toLowerCase().includes('won')) {
-          wonCount += 1;
-          wonAmount += amt;
-        } else if (stage.toLowerCase().includes('lost')) {
-          lostCount += 1;
-          lostAmount += amt;
-        }
-      }
-      continue;
-    }
 
     const bucket = byStage.get(stage) ?? { stage, count: 0, total_amount: 0 };
     bucket.count += 1;
@@ -511,6 +534,18 @@ export async function getExecutiveLensData(windowDays = 7): Promise<ExecutiveLen
         deal_name: d.properties.dealname ?? '(unnamed deal)',
         reason: `close date ${closeDateIso.slice(0, 10)} passed`,
       });
+    }
+  }
+
+  for (const d of closedSearch.results) {
+    const stage = (d.properties.dealstage ?? '').toLowerCase();
+    const amt = toNum(d.properties.amount) ?? 0;
+    if (stage.includes('won')) {
+      wonCount += 1;
+      wonAmount += amt;
+    } else if (stage.includes('lost')) {
+      lostCount += 1;
+      lostAmount += amt;
     }
   }
 

@@ -44,6 +44,10 @@ export async function getTodaysEvents(date: Date): Promise<CalendarEvent[]> {
     .map((e) => {
       const attendees: Attendee[] = (e.attendees ?? [])
         .filter((a): a is typeof a & { email: string } => Boolean(a.email))
+        // Drop declined attendees — a 1:1 the seller declined should not
+        // trigger the seller lens, and a meeting where everyone declined
+        // probably isn't happening.
+        .filter((a) => a.responseStatus !== 'declined')
         .map((a) => ({
           email: a.email,
           name: a.displayName ?? undefined,
@@ -62,14 +66,36 @@ export async function getTodaysEvents(date: Date): Promise<CalendarEvent[]> {
     });
 }
 
+function getMyDomain(): string {
+  const myEmail = process.env.MY_EMAIL ?? '';
+  const at = myEmail.indexOf('@');
+  return at >= 0 ? myEmail.slice(at + 1).toLowerCase() : '';
+}
+
+function getDomain(email: string): string {
+  const at = email.indexOf('@');
+  return at >= 0 ? email.slice(at + 1).toLowerCase() : '';
+}
+
 export function deriveSeriesId(event: CalendarEvent): string {
   if (event.recurringEventId) return event.recurringEventId;
   const normalized = event.title.toLowerCase().replace(SUBJECT_PREFIX_RE, '').trim();
   const slug = slugify(normalized);
-  const emails = event.attendees
-    .map((a) => a.email.toLowerCase())
-    .sort()
-    .join(',');
-  const hash = createHash('sha1').update(emails).digest('hex');
+  // Hash sorted external attendee *domains*, not emails. Stable across
+  // personnel changes within a counterparty org — "Quarterly review with ACME"
+  // produces the same series_id whether [a@acme] or [a@acme,b@acme] attends.
+  // Internal-only meetings collapse to a fixed "internal" bucket so a recurring
+  // internal meeting with shifting attendance still groups under one series_id
+  // (combined with the title slug).
+  const myDomain = getMyDomain();
+  const externalDomains = Array.from(
+    new Set(
+      event.attendees
+        .map((a) => getDomain(a.email))
+        .filter((d) => d.length > 0 && d !== myDomain)
+    )
+  ).sort();
+  const hashInput = externalDomains.length > 0 ? externalDomains.join(',') : 'internal';
+  const hash = createHash('sha1').update(hashInput).digest('hex');
   return `adhoc:${slug}:${hash}`;
 }

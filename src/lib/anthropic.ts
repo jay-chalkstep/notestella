@@ -5,7 +5,7 @@ import type { CustomerLensData, SellerLensData, ExecutiveLensData } from '@/lib/
 const MODEL_ID = 'claude-opus-4-7';
 
 // Bump whenever any prompt changes so logs can correlate output quality to prompt revisions.
-export const PROMPT_VERSION = 5;
+export const PROMPT_VERSION = 6;
 
 // No cache_control: Opus 4.7 minimum cacheable prefix is 4096 tokens; these prompts are
 // ~750 tokens each, so cache_control would be a silent no-op. At ~10 calls/morning the
@@ -44,7 +44,14 @@ CRM section:
 - Do not draw conclusions. Never write "X is struggling", "X is checked out", "this deal is stuck",
   "the customer is disengaged". If you find yourself wanting to write a conclusion, restate the
   underlying fact instead.
-- Budget: max 6 facts and max 6 flags. Prioritize specificity over completeness.`;
+- Budget: max 6 facts and max 6 flags. Prioritize specificity over completeness.
+
+Person context (optional "What you know about these people" block):
+- The user has hand-curated notes about specific attendees. Treat them as ground truth context.
+- Use them to frame the "context" paragraph and personalize agenda_suggestions when relevant.
+- Synthesize, do not regurgitate verbatim. The user wrote them; they don't need to read them back.
+- Do NOT use person notes as a substitute for priors — priors are what actually happened in past
+  meetings, person notes are background the user has been carrying. Both feed the brief.`;
 
 export const NOTE_EXTRACTION_SYSTEM = `You are extracting handwritten notes from a meeting page.
 
@@ -94,6 +101,12 @@ export type PriorMeeting = {
 
 export type BriefCrmData = CustomerLensData | SellerLensData | ExecutiveLensData | null;
 
+export type PersonContext = {
+  email: string;
+  name?: string;
+  notes: string;
+};
+
 export type BriefInput = {
   title: string;
   date: string;
@@ -103,6 +116,7 @@ export type BriefInput = {
   description?: string;
   priors: PriorMeeting[];
   crmData?: BriefCrmData;
+  personContext?: PersonContext[];
 };
 
 export type CrmSection = {
@@ -164,10 +178,17 @@ function buildBriefUserMessage(input: BriefInput): string {
     ? `\n\nCRM data (${input.crmData.lens} lens):\n${JSON.stringify(input.crmData, null, 2)}`
     : '';
 
+  const personBlock =
+    input.personContext && input.personContext.length > 0
+      ? `\n\nWhat you know about these people:\n${input.personContext
+          .map((p) => `- ${p.name ?? p.email}: ${p.notes}`)
+          .join('\n')}`
+      : '';
+
   return `Meeting: ${input.title}
 Date: ${input.date} ${input.startTime}-${input.endTime} MT
 Attendees: ${formatAttendees(input.attendees)}
-Description: ${input.description ?? '(none)'}
+Description: ${input.description ?? '(none)'}${personBlock}
 
 Prior meetings in this series (most recent first, up to 5):
 ${priorsBlock}${crmBlock}

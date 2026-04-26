@@ -1,6 +1,10 @@
 import { formatInTimeZone } from 'date-fns-tz';
 import { getSupabase } from '@/lib/supabase';
 import { getExecutiveLensData, fetchOwnerActivityCounts } from '@/lib/hubspot';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const TZ = 'America/Denver';
 const ACTIVITY_WINDOW_DAYS = 7;
@@ -86,8 +90,9 @@ async function buildRepActivity(
   return { rep_activity, failures };
 }
 
-export async function POST(req: Request): Promise<Response> {
+async function run(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
+  getEnv();
 
   const now = new Date();
   const snapshotDate = formatInTimeZone(now, TZ, 'yyyy-MM-dd');
@@ -125,4 +130,12 @@ export async function POST(req: Request): Promise<Response> {
     },
     { status: partial ? 207 : 200 }
   );
+}
+
+export async function GET(req: Request): Promise<Response> {
+  return run(req);
+}
+
+export async function POST(req: Request): Promise<Response> {
+  return run(req);
 }

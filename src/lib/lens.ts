@@ -12,6 +12,7 @@ export type PersonRow = {
   email: string;
   role: 'customer' | 'seller' | 'sales_leader' | 'other';
   hubspot_owner_id: string | null;
+  notes: string | null;
 };
 
 export type PeopleMap = Map<string, PersonRow>;
@@ -21,7 +22,7 @@ export async function loadPeople(emails: string[]): Promise<PeopleMap> {
   if (unique.length === 0) return new Map();
   const { data, error } = await getSupabase()
     .from('people')
-    .select('email, role, hubspot_owner_id')
+    .select('email, role, hubspot_owner_id, notes')
     .in('email', unique);
   if (error) throw new Error(`people lookup: ${error.message}`);
   return new Map(

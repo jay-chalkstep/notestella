@@ -1,6 +1,10 @@
 import { getSupabase } from '@/lib/supabase';
 import { embed } from '@/lib/voyage';
 import { generateSearchAnswer, type SearchCandidate } from '@/lib/anthropic';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 type SearchBody = { query: string };
 
@@ -28,6 +32,7 @@ type MatchRow = {
 
 export async function POST(req: Request): Promise<Response> {
   if (!readSecretOk(req)) return unauthorized();
+  getEnv();
 
   let body: SearchBody;
   try {

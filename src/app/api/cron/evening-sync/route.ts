@@ -2,6 +2,11 @@ import { getSupabase } from '@/lib/supabase';
 import { extractNotesFromImage } from '@/lib/anthropic';
 import { embed } from '@/lib/voyage';
 import { decodeFilename } from '@/types';
+import { getEnv } from '@/lib/env';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 type Payload = {
   filename: string;
@@ -21,6 +26,7 @@ function bearerOk(req: Request): boolean {
 
 export async function POST(req: Request): Promise<Response> {
   if (!bearerOk(req)) return unauthorized();
+  getEnv();
 
   let body: Payload;
   try {
@@ -30,6 +36,22 @@ export async function POST(req: Request): Promise<Response> {
   }
   if (!body.filename || !body.image_base64 || typeof body.page_number !== 'number') {
     return Response.json({ error: 'missing fields' }, { status: 400 });
+  }
+
+  // Reflection PDFs (`reflection-daily-*.pdf`, `reflection-weekly-*.pdf`) and
+  // the daily-overview PDF share the inbox with meeting briefs, but their
+  // handwritten content is the reflective response — not meeting notes — so we
+  // skip them here. Source of truth for reflection content is the structured
+  // jsonb in the `reflections` table; the PDF is disposable. The bash
+  // extraction script already filters with FILENAME_RE, but we double-check
+  // server-side so manual curl testing or alternate ingestion paths can't
+  // accidentally store a reflection response as a note.
+  if (
+    body.filename.startsWith('reflection-') ||
+    /__daily-overview__/.test(body.filename)
+  ) {
+    console.log('[evening-sync] skipping non-meeting PDF', { filename: body.filename });
+    return Response.json({ skipped: true, reason: 'non_meeting_pdf' }, { status: 200 });
   }
 
   const parsed = decodeFilename(body.filename);
